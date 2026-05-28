@@ -14,8 +14,10 @@ Default mapping:
 from __future__ import annotations
 
 import functools
+import subprocess
 import sys
 import time
+from pathlib import Path
 from dataclasses import dataclass
 
 import rsim
@@ -57,6 +59,15 @@ MAX_STEERING = 0.45
 STEER_SIGN = -1.0
 FORWARD_GEAR = 1
 FORWARD_MODE_TRANS = 2
+
+ENABLE_FORCE_FEEDBACK = True
+FFB_SCRIPT = Path(__file__).with_name("FFB.py")
+# Leave empty to let FFB.py auto-detect, or set /dev/input/eventX here.
+FFB_DEVICE = ""
+FFB_RATE_HZ = 100
+FFB_PRINT_HZ = 0.0
+# Example: ["--gain", "0.7", "--max-torque", "0.8"]
+FFB_EXTRA_ARGS: list[str] = []
 
 
 @dataclass
@@ -132,6 +143,8 @@ def main() -> int:
         print(f"logitech init failed: {exc}")
         return 1
 
+    ffb_process = None
+
     print_control_help()
 
     client = connect_rsim_client()
@@ -141,6 +154,7 @@ def main() -> int:
     print(f"is_ready: {is_ready}")
     if not is_ready:
         print("rsim init timeout")
+        stop_force_feedback(ffb_process)
         controller.close()
         return 1
 
@@ -175,16 +189,18 @@ def main() -> int:
 
     vehicle_client.on_vehicle_status(on_vehicle_status)
 
-    client.run()
-    print("run requested")
-
-    start_time = time.monotonic()
-    last_control_time = start_time
-    last_print_time = start_time
-    last_control = ControlState()
     exit_code = 0
 
     try:
+        client.run()
+        ffb_process = start_force_feedback()
+        print("run requested")
+
+        start_time = time.monotonic()
+        last_control_time = start_time
+        last_print_time = start_time
+        last_control = ControlState()
+
         while True:
             now = time.monotonic()
             elapsed = now - start_time
@@ -224,9 +240,55 @@ def main() -> int:
         print("interrupted by user")
     finally:
         send_stop_command(vehicle_client)
+        stop_force_feedback(ffb_process)
         controller.close()
 
     return exit_code
+
+
+def start_force_feedback():
+    if not ENABLE_FORCE_FEEDBACK:
+        return None
+    if not FFB_SCRIPT.exists():
+        print(f"force feedback skipped: {FFB_SCRIPT} not found")
+        return None
+
+    cmd = [
+        sys.executable,
+        str(FFB_SCRIPT),
+        "--rate",
+        str(FFB_RATE_HZ),
+        "--print-hz",
+        str(FFB_PRINT_HZ),
+    ]
+    if FFB_DEVICE:
+        cmd.extend(["--device", FFB_DEVICE])
+    cmd.extend(FFB_EXTRA_ARGS)
+
+    try:
+        process = subprocess.Popen(cmd)
+    except Exception as exc:
+        print(f"force feedback skipped: {exc}")
+        return None
+
+    print(f"force feedback started: pid={process.pid}, script={FFB_SCRIPT}")
+    return process
+
+
+def stop_force_feedback(process) -> None:
+    if process is None:
+        return
+    if process.poll() is not None:
+        print(f"force feedback exited: code={process.returncode}")
+        return
+
+    process.terminate()
+    try:
+        process.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=2.0)
+    print("force feedback stopped")
 
 
 def make_control_cmd(control: ControlState):
