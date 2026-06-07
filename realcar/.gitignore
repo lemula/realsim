@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+
+.claude/
+.codex/
+.agents/
+
+scene*.csv
+*.png
